@@ -29,7 +29,7 @@ async def send_single_communication(comm_id: int):
             "customer_id": comm.customer_id,
             "message": comm.message,
             "channel": comm.channel,
-            "callback_url": f"{CRM_BACKEND_URL}/api/receipts"
+            "callback_url": f"{CRM_BACKEND_URL.rstrip('/')}/api/receipts"
         }
 
         success = False
@@ -41,11 +41,14 @@ async def send_single_communication(comm_id: int):
             
             try:
                 logger.info(f"Sending comm {comm.id} to Channel Service (attempt {attempt}/{max_retries})...")
+                # Strip trailing slashes to prevent //send double slashes
+                base_url = CHANNEL_SERVICE_URL.rstrip('/')
+                
                 # Run the blocking request in an executor to keep it async
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None, 
-                    lambda: requests.post(f"{CHANNEL_SERVICE_URL}/send", json=payload, timeout=5)
+                    lambda: requests.post(f"{base_url}/send", json=payload, timeout=15)
                 )
                 
                 if response.status_code == 200:
