@@ -16,14 +16,15 @@ async def send_single_communication(comm_id: int):
     """
     Sends a single communication to the Channel Service.
     Implements up to 3 attempts with 2-second sleep in case of connection issues.
-    Uses its own database session to avoid concurrency issues with asyncio.gather.
+    Frees database connections during long-running HTTP requests to prevent QueuePool overflow.
     """
+    # Phase 1: Fetch payload data
     db = SessionLocal()
     try:
         comm = db.query(Communication).filter(Communication.id == comm_id).first()
         if not comm:
             return
-
+            
         payload = {
             "communication_id": comm.id,
             "customer_id": comm.customer_id,
@@ -31,40 +32,48 @@ async def send_single_communication(comm_id: int):
             "channel": comm.channel,
             "callback_url": f"{CRM_BACKEND_URL.rstrip('/')}/api/receipts"
         }
+    finally:
+        db.close()
 
-        success = False
-        max_retries = 3
-        
-        for attempt in range(1, max_retries + 1):
-            comm.delivery_attempts = attempt
-            db.commit()
+    success = False
+    max_retries = 3
+    final_attempt = 1
+    
+    # Phase 2: Execute HTTP Request
+    for attempt in range(1, max_retries + 1):
+        final_attempt = attempt
+        try:
+            logger.info(f"Sending comm {comm_id} to Channel Service (attempt {attempt}/{max_retries})...")
+            # Strip trailing slashes to prevent //send double slashes
+            base_url = CHANNEL_SERVICE_URL.rstrip('/')
             
-            try:
-                logger.info(f"Sending comm {comm.id} to Channel Service (attempt {attempt}/{max_retries})...")
-                # Strip trailing slashes to prevent //send double slashes
-                base_url = CHANNEL_SERVICE_URL.rstrip('/')
-                
-                # Run the blocking request in an executor to keep it async
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None, 
-                    lambda: requests.post(f"{base_url}/send", json=payload, timeout=15)
-                )
-                
-                if response.status_code == 200:
-                    success = True
-                    logger.info(f"Successfully sent comm {comm.id} to Channel Service.")
-                    break
-                else:
-                    logger.warning(f"Channel service returned status {response.status_code} for comm {comm.id}.")
-            except Exception as e:
-                logger.error(f"Error calling Channel Service for comm {comm.id} (attempt {attempt}): {e}")
-                
-            if attempt < max_retries:
-                await asyncio.sleep(2.0)
+            # Run the blocking request in an executor to keep it async
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, 
+                lambda: requests.post(f"{base_url}/send", json=payload, timeout=15)
+            )
+            
+            if response.status_code == 200:
+                success = True
+                logger.info(f"Successfully sent comm {comm_id} to Channel Service.")
+                break
+            else:
+                logger.warning(f"Channel service returned status {response.status_code} for comm {comm_id}.")
+        except Exception as e:
+            logger.error(f"Error calling Channel Service for comm {comm_id} (attempt {attempt}): {e}")
+            
+        if attempt < max_retries:
+            await asyncio.sleep(2.0)
 
-        # Re-evaluate inside db session
+    # Phase 3: Save results back to DB
+    db = SessionLocal()
+    try:
         comm = db.query(Communication).filter(Communication.id == comm_id).first()
+        if not comm:
+            return
+            
+        comm.delivery_attempts = final_attempt
         if success:
             comm.status = "sent"
             comm.sent_at = datetime.datetime.utcnow()
@@ -80,14 +89,14 @@ async def send_single_communication(comm_id: int):
             event = Event(
                 communication_id=comm.id,
                 event_type="failed",
-                metadata_json={"error": "Failed to dispatch to Channel Service after 3 attempts"},
+                metadata_json={"error": f"Failed to dispatch to Channel Service after {max_retries} attempts"},
                 timestamp=datetime.datetime.utcnow()
             )
             db.add(event)
             
         db.commit()
     except Exception as e:
-        logger.error(f"Error in send_single_communication for comm {comm_id}: {e}")
+        logger.error(f"Error in Phase 3 save for comm {comm_id}: {e}")
     finally:
         db.close()
 
