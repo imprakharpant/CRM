@@ -365,7 +365,7 @@ export default function CampaignBuilder({ setPage, setCampaignId }: CampaignBuil
                 <input 
                   type="range" min="0" max="180" 
                   value={inactiveDays} onChange={(e) => setInactiveDays(parseInt(e.target.value))}
-                  className="w-full accent-accent cursor-pointer h-1.5 bg-border-subtle rounded-xl appearance-none focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 />
               </div>
 
@@ -377,7 +377,7 @@ export default function CampaignBuilder({ setPage, setCampaignId }: CampaignBuil
                 <input 
                   type="range" min="0" max="15000" step="500"
                   value={minSpend} onChange={(e) => setMinSpend(parseInt(e.target.value))}
-                  className="w-full accent-accent cursor-pointer h-1.5 bg-border-subtle rounded-xl appearance-none focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className="w-full focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                 />
               </div>
 

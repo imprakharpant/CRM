@@ -69,27 +69,92 @@ def parse_segment_prompt(prompt: str) -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"Gemini segmentation parse failed: {e}. Falling back to rule-based parsing.")
             
-    # Mock/Rule-based Fallback (Simple Regex-like matching for common cases)
+    # Mock/Rule-based Fallback (Advanced Context-Aware Parsing)
     import re
     inactive_days = None
     min_spend = None
-    
-    # Try parsing days
-    days_matches = re.findall(r'(\d+)\s*days?', prompt, re.IGNORECASE)
-    if days_matches:
-        inactive_days = int(days_matches[0])
-    
-    # Try parsing spend amount (e.g., 5000 or ₹5000 or Rs. 5000 or spent 4000)
-    spend_matches = re.findall(r'(?:₹|rs\.?|spen[dt](?:\s+more\s+than)?)\s*(\d+)', prompt, re.IGNORECASE)
-    if spend_matches:
-        min_spend = float(spend_matches[0])
-    else:
-        # Generic number matching for spend if days matches
-        num_matches = re.findall(r'(?:over|above|>\s*|more\s+than\s*)\s*(?:₹|rs\.?)?\s*(\d+)', prompt, re.IGNORECASE)
-        if num_matches:
-            min_spend = float(num_matches[0])
 
-    # Default values if parsing fails completely
+    # Remove commas in numbers (e.g. 8,000 -> 8000)
+    cleaned_prompt = re.sub(r'(\d+),(\d+)', r'\1\2', prompt)
+    
+    # Map word numbers to digits
+    words_map = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+        'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15, 'sixteen': 16,
+        'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20, 'thirty': 30, 'forty': 40, 'fifty': 50,
+        'sixty': 60, 'seventy': 70, 'eighty': 80, 'ninety': 90
+    }
+    
+    normalized = cleaned_prompt.lower().replace('-', ' ')
+    
+    # Replace compound numbers (e.g. twenty seven -> 27)
+    for tens in ['twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety']:
+        for units in ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']:
+            phrase = f"{tens} {units}"
+            val = words_map[tens] + words_map[units]
+            normalized = re.sub(rf'\b{phrase}\b', str(val), normalized)
+            
+    for word, val in words_map.items():
+        normalized = re.sub(rf'\b{word}\b', str(val), normalized)
+        
+    # Handle scale words: e.g. "8 thousand" -> 8000
+    normalized = re.sub(r'\b(\d+)\s+thousand\b', lambda m: str(int(m.group(1)) * 1000), normalized)
+    normalized = re.sub(r'\b(\d+)\s+hundred\b', lambda m: str(int(m.group(1)) * 100), normalized)
+
+    # Find all numbers and their positions in the text
+    numbers = []
+    for m in re.finditer(r'\b\d+\b', normalized):
+        numbers.append((int(m.group()), m.start(), m.end()))
+
+    # Helper to scan surrounding context of a match
+    def get_context(start, end, window=35):
+        left = normalized[max(0, start - window):start]
+        right = normalized[end:min(len(normalized), end + window)]
+        return left + " | " + right
+
+    days_keywords = ['day', 'days', 'month', 'months', 'week', 'weeks', 'inactive', 'purchase', 'ordered']
+    spend_keywords = ['₹', 'rs', 'rupee', 'rupees', 'spend', 'spending', 'spent', 'cost', 'price', 'min', 'minimum', 'amount']
+
+    for num, start, end in numbers:
+        # Check immediate context (up to 12 chars left/right)
+        left_near = normalized[max(0, start - 12):start]
+        right_near = normalized[end:min(len(normalized), end + 12)]
+        
+        # Explicit days checks
+        if any(w in right_near for w in ['day', 'days', 'week', 'weeks', 'month', 'months']):
+            if 'month' in right_near:
+                inactive_days = num * 30
+            elif 'week' in right_near:
+                inactive_days = num * 7
+            else:
+                inactive_days = num
+            continue
+            
+        # Explicit spend checks
+        if any(w in left_near for w in ['₹', 'rs', 'spent', 'spend', 'spending', 'min', 'minimum', '$']) or \
+           any(w in right_near for w in ['rupee', 'rupees', 'rs', 'usd', 'dollars', 'bucks']):
+            min_spend = float(num)
+            continue
+
+        # Broader context scoring fallback
+        context = get_context(start, end)
+        is_days = any(k in context for k in days_keywords)
+        is_spend = any(k in context for k in spend_keywords)
+        
+        if is_days and is_spend:
+            days_score = sum(context.count(k) for k in days_keywords)
+            spend_score = sum(context.count(k) for k in spend_keywords)
+            if days_score >= spend_score:
+                is_spend = False
+            else:
+                is_days = False
+
+        if is_days and inactive_days is None:
+            inactive_days = num
+        elif is_spend and min_spend is None:
+            min_spend = float(num)
+
+    # Fallback to defaults only if BOTH are missing
     if inactive_days is None and min_spend is None:
         inactive_days = 60
         min_spend = 5000.0
